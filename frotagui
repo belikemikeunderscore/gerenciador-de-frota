@@ -1,0 +1,414 @@
+import sys
+import csv
+import datetime
+
+from classes import *
+
+from typing import List, Callable
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QListWidget, QLineEdit, QLabel, QComboBox, QMessageBox,
+    QDialog, QFormLayout, QSpinBox, QDoubleSpinBox, QFileDialog, QGroupBox, QGridLayout, QDialogButtonBox, QSpacerItem, QSizePolicy
+)
+from PyQt6.QtCore import Qt
+
+def log_operacao(func: Callable) -> Callable:
+    def wrapper(*args, **kwargs):
+        agora = datetime.datetime.now()
+        mensagem = f"[{agora.isoformat(sep=' ', timespec='seconds')}] A executar: {func.__name__}"
+        print(mensagem)
+        try:
+            with open("frota_log.txt", "a", encoding="utf-8") as f:
+                f.write(mensagem + "\n")
+        except Exception as e:
+            print("Aviso: não foi possível escrever no ficheiro de log:", e)
+        return func(*args, **kwargs)
+    wrapper.__name__ = func.__name__
+    return wrapper
+
+
+
+class Frota:
+    def __init__(self):
+        self.veiculos: List[Veiculo] = []
+
+    @log_operacao
+    def adicionar_veiculo(self, v: Veiculo) -> None:
+        self.veiculos.append(v)
+
+    @log_operacao
+    def remover_veiculo_por_indice(self, indice: int) -> bool:
+        if 0 <= indice < len(self.veiculos):
+            removed = self.veiculos.pop(indice)
+            print(f"Removido: {removed}")
+            return True
+        return False
+
+    def listar_veiculos(self) -> List[str]:
+        return [str(v) for v in self.veiculos]
+
+    def filtrar_por_marca(self, marca: str) -> List[Veiculo]:
+        return [v for v in self.veiculos if v.marca.lower() == marca.lower()]
+
+    def aplicar_operacao_preco(self, operacao: Callable[[float], float]) -> None:
+        for v in self.veiculos:
+            old = v.preco
+            v.preco = float(operacao(v.preco))
+            if v.preco < 0:
+                v.preco = 0.0
+            print(f"Preço atualizado: {v.marca} {old:.2f}€ -> {v.preco:.2f}€")
+
+    def exportar_inventario_csv(self, caminho_ficheiro: str = "frotadb.csv") -> None:
+        if not self.veiculos:
+            raise RuntimeError("Frota vazia. Nada para exportar.")
+        campos = ["tipo", "marca", "preco", "ano", "kms"]
+        campos_adicionais = set()
+        for v in self.veiculos:
+            d = v.to_dict()
+            for k in d.keys():
+                if k not in campos:
+                    campos_adicionais.add(k)
+        campos.extend(sorted(campos_adicionais))
+        with open(caminho_ficheiro, mode="w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=campos)
+            writer.writeheader()
+            for v in self.veiculos:
+                writer.writerow(v.to_dict())
+
+    def carregar_inventario_csv(self, caminho_ficheiro: str = "frotadb.csv") -> int:
+        cont = 0
+        try:
+            with open(caminho_ficheiro, mode="r", newline="", encoding="utf-8") as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    tipo = (row.get("tipo") or "").strip().lower()
+                    marca = (row.get("marca") or "").strip()
+                    preco_s = (row.get("preco") or "0").strip()
+                    try:
+                        preco = float(preco_s.replace(",", "."))
+                    except Exception:
+                        preco = 0.0
+                    ano_s = (row.get("ano") or "").strip()
+                    ano = int(ano_s) if ano_s else None
+                    kms_s = (row.get("kms") or "0").strip()
+                    try:
+                        kms = int(float(kms_s.replace(",", ".")))
+                    except Exception:
+                        kms = 0
+
+                    if tipo in ("carroeletrico", "carro_eletrico", "carro elétrico", "carro eletrico"):
+                        bateria_s = (row.get("bateria_kwh") or "0").strip()
+                        autonomia_s = (row.get("autonomia_km") or "0").strip()
+                        try:
+                            bateria_kwh = float(bateria_s.replace(",", "."))
+                        except Exception:
+                            bateria_kwh = 0.0
+                        try:
+                            autonomia_km = int(float(autonomia_s.replace(",", ".")))
+                        except Exception:
+                            autonomia_km = 0
+                        v = CarroEletrico(marca, preco, bateria_kwh, autonomia_km, ano, kms)
+
+                    elif tipo in ("camiao", "camião", "camião"):
+                        carga_s = (row.get("carga_max_kg") or "0").strip()
+                        try:
+                            carga_max = int(float(carga_s.replace(",", ".")))
+                        except Exception:
+                            carga_max = 0
+                        v = Camiao(marca, preco, carga_max, ano, kms)
+
+                    else:
+                        v = Veiculo(marca, preco, ano, kms)
+
+                    self.veiculos.append(v)
+                    cont += 1
+        except FileNotFoundError:
+            # Silencioso: começar com frota vazia
+            pass
+        return cont
+
+class AddVehicleDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Adicionar Veículo")
+        self.setModal(True)
+        self.result_vehicle = None
+        self.setMinimumWidth(420)
+
+        # --- Grupo: Informação Básica ---
+        basic_group = QGroupBox("Informação básica")
+        basic_layout = QGridLayout()
+
+        self.tipo_combo = QComboBox()
+        self.tipo_combo.addItems(["Veiculo", "CarroEletrico", "Camiao"])
+        self.tipo_combo.setToolTip("Escolhe o tipo de veículo")
+        basic_layout.addWidget(QLabel("Tipo:"), 0, 0)
+        basic_layout.addWidget(self.tipo_combo, 0, 1)
+
+        self.marca_edit = QLineEdit()
+        self.marca_edit.setPlaceholderText("Ex.: Renault, Tesla, Volvo")
+        self.marca_edit.setToolTip("Marca do veículo (obrigatório)")
+        basic_layout.addWidget(QLabel("Marca:"), 1, 0)
+        basic_layout.addWidget(self.marca_edit, 1, 1)
+
+        self.preco_spin = QDoubleSpinBox()
+        self.preco_spin.setRange(0, 10_000_000)
+        self.preco_spin.setDecimals(2)
+        self.preco_spin.setSuffix(" €")
+        self.preco_spin.setToolTip("Preço em euros")
+        basic_layout.addWidget(QLabel("Preço:"), 2, 0)
+        basic_layout.addWidget(self.preco_spin, 2, 1)
+
+        self.ano_spin = QSpinBox()
+        self.ano_spin.setRange(0, 3000)
+        self.ano_spin.setValue(0)  # 0 significa vazio
+        self.ano_spin.setToolTip("Ano (0 = opcional)")
+        basic_layout.addWidget(QLabel("Ano:"), 3, 0)
+        basic_layout.addWidget(self.ano_spin, 3, 1)
+
+        self.kms_spin = QSpinBox()
+        self.kms_spin.setRange(0, 10_000_000)
+        self.kms_spin.setSuffix(" km")
+        self.kms_spin.setToolTip("Quilometragem")
+        basic_layout.addWidget(QLabel("Kms:"), 4, 0)
+        basic_layout.addWidget(self.kms_spin, 4, 1)
+
+        basic_group.setLayout(basic_layout)
+
+        # --- Grupo: Específicos (visível apenas quando aplicável) ---
+        specifics_group = QGroupBox("Extras:")
+        specifics_layout = QGridLayout()
+
+        self.bateria_spin = QDoubleSpinBox()
+        self.bateria_spin.setRange(0, 10_000)
+        self.bateria_spin.setDecimals(2)
+        self.bateria_spin.setSuffix(" kWh")
+        self.bateria_spin.setToolTip("Capacidade da bateria (kWh)")
+        specifics_layout.addWidget(QLabel("Bateria:"), 0, 0)
+        specifics_layout.addWidget(self.bateria_spin, 0, 1)
+
+        self.autonomia_spin = QSpinBox()
+        self.autonomia_spin.setRange(0, 1_000_000)
+        self.autonomia_spin.setSuffix(" km")
+        self.autonomia_spin.setToolTip("Autonomia em km")
+        specifics_layout.addWidget(QLabel("Autonomia:"), 1, 0)
+        specifics_layout.addWidget(self.autonomia_spin, 1, 1)
+
+        self.carga_spin = QSpinBox()
+        self.carga_spin.setRange(0, 10_000_000)
+        self.carga_spin.setSuffix(" kg")
+        self.carga_spin.setToolTip("Carga máxima (kg)")
+        specifics_layout.addWidget(QLabel("Carga máx.:"), 2, 0)
+        specifics_layout.addWidget(self.carga_spin, 2, 1)
+
+        specifics_group.setLayout(specifics_layout)
+
+        # --- Botões ---
+        self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.button_box.button(QDialogButtonBox.StandardButton.Ok).setText("OK")
+        self.button_box.button(QDialogButtonBox.StandardButton.Cancel).setText("Cancelar")
+        self.button_box.button(QDialogButtonBox.StandardButton.Ok).setDefault(True)
+        self.button_box.button(QDialogButtonBox.StandardButton.Ok).setAutoDefault(True)
+
+        # Ligações
+        self.button_box.accepted.connect(self.on_ok)
+        self.button_box.rejected.connect(self.reject)
+        self.tipo_combo.currentTextChanged.connect(self.on_tipo_change)
+
+        # --- Layout principal ---
+        main_layout = QVBoxLayout()
+        main_layout.addWidget(basic_group)
+        main_layout.addWidget(specifics_group)
+        main_layout.addItem(QSpacerItem(20, 12, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        main_layout.addWidget(self.button_box)
+        self.setLayout(main_layout)
+
+        # estado inicial dos campos específicos
+        self.on_tipo_change(self.tipo_combo.currentText())
+
+        # foco inicial e tab order mais natural
+        self.marca_edit.setFocus()
+        self.setTabOrder(self.marca_edit, self.preco_spin)
+        self.setTabOrder(self.preco_spin, self.ano_spin)
+        self.setTabOrder(self.ano_spin, self.kms_spin)
+        self.setTabOrder(self.kms_spin, self.tipo_combo)
+        self.setTabOrder(self.tipo_combo, self.bateria_spin)
+
+    def on_tipo_change(self, tipo: str):
+        """Ativa / desativa campos específicos conforme o tipo."""
+        is_eletrico = tipo == "CarroEletrico"
+        is_camiao = tipo == "Camiao"
+
+        self.bateria_spin.setEnabled(is_eletrico)
+        self.autonomia_spin.setEnabled(is_eletrico)
+        self.carga_spin.setEnabled(is_camiao)
+
+        if not is_eletrico:
+            self.bateria_spin.setValue(0)
+            self.autonomia_spin.setValue(0)
+        if not is_camiao:
+            self.carga_spin.setValue(0)
+
+
+    def on_ok(self):
+        marca = self.marca_edit.text().strip()
+        if not marca:
+            QMessageBox.warning(self, "Erro", "Marca não pode estar vazia.")
+            self.marca_edit.setFocus()
+            return
+        preco = float(self.preco_spin.value())
+        ano = int(self.ano_spin.value()) if self.ano_spin.value() != 0 else None
+        kms = int(self.kms_spin.value())
+
+        tipo = self.tipo_combo.currentText()
+        if tipo == "CarroEletrico":
+            bateria = float(self.bateria_spin.value())
+            autonomia = int(self.autonomia_spin.value())
+            v = CarroEletrico(marca, preco, bateria, autonomia, ano, kms)
+        elif tipo == "Camiao":
+            carga = int(self.carga_spin.value())
+            v = Camiao(marca, preco, carga, ano, kms)
+        else:
+            v = Veiculo(marca, preco, ano, kms)
+
+        self.result_vehicle = v
+        self.accept()
+
+
+# ---------------------------
+# Janela principal
+# ---------------------------
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Gestão de Frota")
+        self.resize(800, 600)
+
+        self.frota = Frota()
+        self.frota.carregar_inventario_csv()
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout()
+
+        top_layout = QHBoxLayout()
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Procurar por marca, ano, tipo,...")
+        self.search_btn = QPushButton("Procurar")
+        self.clear_search_btn = QPushButton("Limpar")
+        top_layout.addWidget(QLabel("Procurar:"))
+        top_layout.addWidget(self.search_edit)
+        top_layout.addWidget(self.search_btn)
+        top_layout.addWidget(self.clear_search_btn)
+
+        layout.addLayout(top_layout)
+
+        self.list_widget = QListWidget()
+        layout.addWidget(self.list_widget)
+
+        btn_layout = QHBoxLayout()
+        self.add_btn = QPushButton("Adicionar Veículo")
+        self.remove_btn = QPushButton("Remover Selecionado")
+        self.discount_btn = QPushButton("Aplicar Desconto 10%")
+        self.export_btn = QPushButton("Exportar Inventário")
+        btn_layout.addWidget(self.add_btn)
+        btn_layout.addWidget(self.remove_btn)
+        btn_layout.addWidget(self.discount_btn)
+        btn_layout.addWidget(self.export_btn)
+
+        layout.addLayout(btn_layout)
+
+        central.setLayout(layout)
+
+        # Ligações
+        self.add_btn.clicked.connect(self.on_add)
+        self.remove_btn.clicked.connect(self.on_remove)
+        self.search_btn.clicked.connect(self.on_search)
+        self.clear_search_btn.clicked.connect(self.on_clear_search)
+        self.discount_btn.clicked.connect(self.on_discount)
+        self.export_btn.clicked.connect(self.on_export)
+
+        self.refresh_list()
+
+    def refresh_list(self, filter_text: str = ""):
+        self.list_widget.clear()
+        items = self.frota.listar_veiculos()
+        if filter_text:
+            items = [it for it in items if filter_text.lower() in it.lower()]
+        for it in items:
+            self.list_widget.addItem(it)
+
+    def on_add(self):
+        dlg = AddVehicleDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_vehicle:
+            self.frota.adicionar_veiculo(dlg.result_vehicle)
+            self.refresh_list(self.search_edit.text().strip())
+
+    def on_remove(self):
+        row = self.list_widget.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Remover", "Seleciona um veículo para remover.")
+            return
+        confirm = QMessageBox.question(self, "Confirmar", "Remover o veículo selecionado?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if confirm == QMessageBox.StandardButton.Yes:
+            # Encontrar índice relativo à frota (quando há filtro, precisamos mapear)
+            filter_text = self.search_edit.text().strip()
+            if filter_text:
+                # Procurar o n-ésimo item que corresponde ao filtro
+                matches = [i for i, v in enumerate(self.frota.veiculos) if filter_text.lower() in str(v).lower()]
+                if 0 <= row < len(matches):
+                    real_index = matches[row]
+                else:
+                    QMessageBox.warning(self, "Erro", "Índice inválido para remoção.")
+                    return
+            else:
+                real_index = row
+            ok = self.frota.remover_veiculo_por_indice(real_index)
+            if ok:
+                self.refresh_list(filter_text)
+            else:
+                QMessageBox.warning(self, "Erro", "Não foi possível remover o veículo.")
+
+    def on_search(self):
+        text = self.search_edit.text().strip()
+        self.refresh_list(text)
+
+    def on_clear_search(self):
+        self.search_edit.clear()
+        self.refresh_list()
+
+    def on_discount(self):
+        desconto = lambda p: p * 0.90
+        self.frota.aplicar_operacao_preco(desconto)
+        self.refresh_list(self.search_edit.text().strip())
+
+    def on_export(self):
+        if not self.frota.veiculos:
+            QMessageBox.information(self, "Exportar", "Frota vazia. Nada para exportar.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Guardar CSV", "frotadb.csv", "CSV Files (*.csv);;All Files (*)")
+        if path:
+            try:
+                self.frota.exportar_inventario_csv(path)
+                QMessageBox.information(self, "Exportar", f"Inventário exportado para:\n{path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Erro", f"Erro ao exportar: {e}")
+
+    def closeEvent(self, event):
+        # Guardar automaticamente na saída
+        try:
+            self.frota.exportar_inventario_csv("frotadb.csv")
+        except Exception:
+            pass
+        event.accept()
+
+
+def main():
+    app = QApplication(sys.argv)
+    w = MainWindow()
+    w.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

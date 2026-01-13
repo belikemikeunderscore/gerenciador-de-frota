@@ -1,0 +1,8 @@
+[2026-01-08 11:57:47] A executar: remover_veiculo_por_indice
+[2026-01-08 12:14:29] A executar: adicionar_veiculo
+[2026-01-12 14:37:13] A executar: remover_veiculo_por_indice
+[2026-01-12 14:37:17] A executar: remover_veiculo_por_indice
+[2026-01-12 14:37:33] A executar: adicionar_veiculo
+[2026-01-12 15:05:14] A executar: remover_veiculo_por_indice
+[2026-01-12 15:05:36] A executar: adicionar_veiculo
+[2026-01-12 15:06:04] A executar: adicionar_veiculo
